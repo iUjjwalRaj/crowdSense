@@ -7,3 +7,17 @@ vite.config.js
 vite.config.d.ts
 __pycache__/
 *.py[cod]
+
+.crowdsense/
+.pytest_cache/
+.wrangler/
+.venv/
+venv/
+screenshots/
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite*
+*.pem
+*.key

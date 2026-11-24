@@ -27,6 +27,12 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 app.include_router(router)
+
+
+@app.get("/")
+@app.get("/health")
+def root_health():
+    return {"service": "CrowdSense API", "status": "ok", "version": "0.1.0"}
 try:
     create_tables()
 except Exception:

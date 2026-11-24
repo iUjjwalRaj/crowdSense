@@ -237,3 +237,80 @@ def audit_log():
     except Exception:
         pass
     return {"audit": AUDIT}
+
+
+@router.get("/stops/search")
+def search_stops(q: str = "", limit: int = 12):
+    network = get_gtfs_network()
+    if not network or not network.stops:
+        return {"stops": []}
+    q_clean = q.strip().lower()
+    if not q_clean:
+        popular_aliases = [
+            ("Rajiv Chowk (DMRC Blue/Yellow)", "207"),
+            ("Kashmere Gate (DMRC Red/Yellow/Violet)", "8"),
+            ("Noida Sector 62 (DMRC Blue)", "237"),
+            ("Anand Vihar Metro (DMRC Blue/Pink)", "74"),
+            ("Anand Vihar Terminal (IR)", "ANVT"),
+            ("New Delhi Railway Station (IR / Airport Exp)", "NDLS"),
+            ("Hapur Junction (IR)", "HPU"),
+            ("Ghaziabad Junction (IR)", "GZB"),
+            ("Patna Junction (IR)", "PNBE"),
+        ]
+        results = []
+        for display_name, sid in popular_aliases:
+            if sid in network.stops:
+                st = network.stops[sid]
+                results.append({
+                    "id": sid,
+                    "name": display_name,
+                    "code": sid,
+                    "lat": st["lat"],
+                    "lng": st["lng"],
+                })
+        return {"stops": results}
+
+    matches = []
+    seen = set()
+    for sid, st in network.stops.items():
+        name = st.get("name", "")
+        if not name:
+            continue
+        if q_clean in name.lower() or q_clean in sid.lower():
+            if sid not in seen:
+                seen.add(sid)
+                matches.append({
+                    "id": sid,
+                    "name": name,
+                    "code": sid,
+                    "lat": st.get("lat"),
+                    "lng": st.get("lng"),
+                })
+                if len(matches) >= limit:
+                    break
+    return {"stops": matches}
+
+
+@router.get("/network/summary")
+def network_summary():
+    network = get_gtfs_network()
+    if not network:
+        return {
+            "status": "unconfigured",
+            "agencies": [],
+            "stops_count": 0,
+            "routes_count": 0,
+            "trips_count": 0,
+        }
+    return {
+        "status": "ready",
+        "timezone": network.timezone_name,
+        "stops_count": len(network.stops),
+        "routes_count": len(network.routes),
+        "trips_count": len(network.trips),
+        "agencies": [
+            {"id": a.get("agency_id"), "name": a.get("agency_name")}
+            for a in getattr(network, "agencies", [])
+        ],
+        "coverage": "Delhi NCR (DMRC) & Indian Railways National Network",
+    }

@@ -37,6 +37,31 @@ class GTFSNetwork:
         self.load_errors: list[str] = []
         self.load()
 
+    @property
+    def raw_stop_times(self) -> list[dict]:
+        rows: list[dict] = []
+        for row in self._read_rows("stop_times.txt"):
+            trip_id = row["trip_id"].strip()
+            if trip_id not in self.trips:
+                continue
+            stop_id = row["stop_id"].strip()
+            if stop_id not in self.stops:
+                continue
+            try:
+                arrival = _time_seconds(row["arrival_time"])
+                departure = _time_seconds(row["departure_time"])
+                sequence = int(row["stop_sequence"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            rows.append({
+                "trip_id": trip_id,
+                "stop_id": stop_id,
+                "arrival_seconds": arrival,
+                "departure_seconds": departure,
+                "stop_sequence": sequence,
+            })
+        return rows
+
     def _open_member(self, name: str):
         if self.source.is_dir():
             path = self.source / name
@@ -141,7 +166,7 @@ class GTFSNetwork:
                 "headsign": row.get("trip_headsign", "").strip(),
             }
 
-        stop_times: dict[str, list[dict]] = {}
+        stop_times: dict[str, list[tuple[int, str, int, int]]] = {}
         for row in self._read_rows("stop_times.txt"):
             trip_id = row["trip_id"].strip()
             if trip_id not in self.trips:
@@ -156,39 +181,25 @@ class GTFSNetwork:
             except (KeyError, TypeError, ValueError):
                 continue
             valid_trip_times += 1
-            st_entry = {
-                "stop_id": stop_id,
-                "arrival": arrival,
-                "departure": departure,
-                "sequence": sequence,
-            }
-            stop_times.setdefault(trip_id, []).append(st_entry)
-            if not hasattr(self, "raw_stop_times"):
-                self.raw_stop_times = []
-            self.raw_stop_times.append({
-                "trip_id": trip_id,
-                "stop_id": stop_id,
-                "arrival_seconds": arrival,
-                "departure_seconds": departure,
-                "stop_sequence": sequence,
-            })
+            stop_times.setdefault(trip_id, []).append((sequence, stop_id, arrival, departure))
 
         for trip_id, times in stop_times.items():
-            times.sort(key=lambda item: item["sequence"])
+            times.sort(key=lambda item: item[0])
             trip = self.trips[trip_id]
             for start, end in zip(times, times[1:]):
-                if end["arrival"] < start["departure"]:
+                if end[2] < start[3]:
                     continue
                 self.edges.append({
-                    "from_stop": start["stop_id"],
-                    "to_stop": end["stop_id"],
-                    "departure": start["departure"],
-                    "arrival": end["arrival"],
+                    "from_stop": start[1],
+                    "to_stop": end[1],
+                    "departure": start[3],
+                    "arrival": end[2],
                     "trip_id": trip_id,
                     "route_id": trip["route_id"],
                     "headsign": trip["headsign"],
                     "service_id": trip["service_id"],
                 })
+        del stop_times
 
         self.calendar = calendar
         self._load_calendar_dates()
@@ -290,6 +301,9 @@ class GTFSNetwork:
         return None
 
 
+_cached_networks: dict[tuple[str, float], GTFSNetwork] = {}
+
+
 def get_gtfs_network() -> GTFSNetwork | None:
     source = os.getenv("CROWDSENSE_GTFS_PATH")
     if not source:
@@ -309,4 +323,12 @@ def get_gtfs_network() -> GTFSNetwork | None:
     path = Path(source)
     if not path.exists():
         return None
-    return GTFSNetwork(path)
+    try:
+        cache_key = (str(path.resolve()), path.stat().st_mtime)
+        if cache_key in _cached_networks:
+            return _cached_networks[cache_key]
+        network = GTFSNetwork(path)
+        _cached_networks[cache_key] = network
+        return network
+    except Exception:
+        return GTFSNetwork(path)

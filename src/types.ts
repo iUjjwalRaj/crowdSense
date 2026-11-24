@@ -16,8 +16,15 @@ export type JourneyAlternative = {
 export type JourneySegment = {
   boarding_stop_id: string;
   destination_stop_id: string;
+  boarding_stop_name?: string;
+  destination_stop_name?: string;
+  boarding_lat?: number | null;
+  boarding_lng?: number | null;
+  destination_lat?: number | null;
+  destination_lng?: number | null;
   route_id?: string | null;
   trip_id?: string | null;
+  headsign?: string | null;
   mode: "transit" | "walk";
   departure_seconds: number;
   arrival_seconds: number;
@@ -37,10 +44,31 @@ export type JourneySegment = {
 export type JourneyPlanResponse = {
   origin?: string;
   destination?: string;
+  origin_stop_id?: string;
+  destination_stop_id?: string;
   status?: "ok" | "no_route" | "invalid_origin" | "invalid_destination" | "data_unavailable";
   detail?: string;
   alternatives: JourneyAlternative[];
-  data_source?: "live" | "predicted" | "historical";
+  stops_info?: Record<string, { id: string; name: string; lat?: number | null; lng?: number | null }>;
+  data_source?: "live" | "predicted" | "historical" | "gtfs";
+};
+
+export type StationSearchResult = {
+  id: string;
+  name: string;
+  code?: string;
+  lat?: number | null;
+  lng?: number | null;
+};
+
+export type NetworkSummary = {
+  status: string;
+  timezone?: string;
+  stops_count: number;
+  routes_count: number;
+  trips_count: number;
+  agencies: Array<{ id?: string; name?: string }>;
+  coverage?: string;
 };
 
 export type JourneyPreference = "balanced" | "fastest" | "comfort";

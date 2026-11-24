@@ -2,7 +2,7 @@ import { chromium } from "@playwright/test";
 import fs from "fs";
 import path from "path";
 
-const screenshotDir = "/Users/samarkumar/.gemini/antigravity/brain/1a22562c-bff0-41fb-b0e0-97a843e7d0dc/screenshots";
+const screenshotDir = path.resolve(process.cwd(), "screenshots");
 if (!fs.existsSync(screenshotDir)) {
   fs.mkdirSync(screenshotDir, { recursive: true });
 }

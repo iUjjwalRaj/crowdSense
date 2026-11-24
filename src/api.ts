@@ -1,10 +1,32 @@
-import type { JourneyPlanResponse } from "./types";
-import type { OperationsSnapshot } from "./types";
+import type { JourneyPlanResponse, OperationsSnapshot, StationSearchResult, NetworkSummary } from "./types";
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
 
 function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`;
+}
+
+export async function searchStations(query: string = ""): Promise<StationSearchResult[]> {
+  try {
+    const response = await fetch(apiUrl(`/api/v1/stops/search?q=${encodeURIComponent(query)}`));
+    if (!response.ok) return [];
+    const data = await response.json();
+    return Array.isArray(data.stops) ? data.stops : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getNetworkSummary(): Promise<NetworkSummary | null> {
+  try {
+    const response = await fetch(apiUrl("/api/v1/network/summary"));
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (!data || typeof data.stops_count !== "number") return null;
+    return data as NetworkSummary;
+  } catch {
+    return null;
+  }
 }
 
 export async function planJourney(
