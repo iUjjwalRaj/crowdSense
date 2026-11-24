@@ -1,6 +1,7 @@
 import os
 import logging
-import traceback
+import threading
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,9 +9,17 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import router
 from app.database import create_tables, database_health
+from app.gtfs import get_gtfs_network
 
 
-app = FastAPI(title="CrowdSense API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if os.getenv("CROWDSENSE_GTFS_PATH") and "PYTEST_CURRENT_TEST" not in os.environ:
+        threading.Thread(target=get_gtfs_network, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="CrowdSense API", version="0.1.0", lifespan=lifespan)
 cors_origins = [
     origin.strip()
     for origin in os.getenv(
@@ -29,8 +38,8 @@ app.add_middleware(
 app.include_router(router)
 
 
-@app.get("/")
-@app.get("/health")
+@app.api_route("/", methods=["GET", "HEAD"])
+@app.api_route("/health", methods=["GET", "HEAD"])
 def root_health():
     return {"service": "CrowdSense API", "status": "ok", "version": "0.1.0"}
 try:

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import csv
+import gc
 import os
+import sys
+import threading
 import zipfile
 from datetime import date, datetime
 from io import TextIOWrapper
@@ -11,6 +14,36 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.providers import GTFS_HEALTH, valid_coordinate, utc_now
 from app.repositories import record_gtfs_import
+
+
+class GTFSEdge:
+    __slots__ = ("from_stop", "to_stop", "departure", "arrival", "trip_id", "route_id", "headsign", "service_id")
+
+    def __init__(
+        self,
+        from_stop: str,
+        to_stop: str,
+        departure: int,
+        arrival: int,
+        trip_id: str,
+        route_id: str,
+        headsign: str,
+        service_id: str,
+    ):
+        self.from_stop = from_stop
+        self.to_stop = to_stop
+        self.departure = departure
+        self.arrival = arrival
+        self.trip_id = trip_id
+        self.route_id = route_id
+        self.headsign = headsign
+        self.service_id = service_id
+
+    def __getitem__(self, key: str):
+        return getattr(self, key)
+
+    def get(self, key: str, default=None):
+        return getattr(self, key, default)
 
 
 def _time_seconds(value: str) -> int:
@@ -167,39 +200,63 @@ class GTFSNetwork:
             }
 
         stop_times: dict[str, list[tuple[int, str, int, int]]] = {}
-        for row in self._read_rows("stop_times.txt"):
-            trip_id = row["trip_id"].strip()
-            if trip_id not in self.trips:
-                continue
-            stop_id = row["stop_id"].strip()
-            if stop_id not in self.stops:
-                continue
-            try:
-                arrival = _time_seconds(row["arrival_time"])
-                departure = _time_seconds(row["departure_time"])
-                sequence = int(row["stop_sequence"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            valid_trip_times += 1
-            stop_times.setdefault(trip_id, []).append((sequence, stop_id, arrival, departure))
+        try:
+            st_handle = self._open_member("stop_times.txt")
+        except (FileNotFoundError, KeyError):
+            st_handle = None
+        if st_handle is not None:
+            with st_handle:
+                reader = csv.reader(st_handle)
+                header = next(reader, None)
+                if header:
+                    col_idx = {col.strip(): idx for idx, col in enumerate(header)}
+                    i_trip = col_idx.get("trip_id")
+                    i_stop = col_idx.get("stop_id")
+                    i_arr = col_idx.get("arrival_time")
+                    i_dep = col_idx.get("departure_time")
+                    i_seq = col_idx.get("stop_sequence")
+                    if None not in (i_trip, i_stop, i_arr, i_dep, i_seq):
+                        req_len = max(i_trip, i_stop, i_arr, i_dep, i_seq) + 1
+                        trips_map = self.trips
+                        stops_map = self.stops
+                        intern = sys.intern
+                        for row in reader:
+                            if len(row) < req_len:
+                                continue
+                            trip_id = row[i_trip].strip()
+                            if trip_id not in trips_map:
+                                continue
+                            stop_id = row[i_stop].strip()
+                            if stop_id not in stops_map:
+                                continue
+                            try:
+                                arrival = _time_seconds(row[i_arr])
+                                departure = _time_seconds(row[i_dep])
+                                sequence = int(row[i_seq])
+                            except (ValueError, TypeError):
+                                continue
+                            valid_trip_times += 1
+                            stop_times.setdefault(trip_id, []).append(
+                                (sequence, intern(stop_id), arrival, departure)
+                            )
 
+        edges = self.edges
+        intern = sys.intern
         for trip_id, times in stop_times.items():
             times.sort(key=lambda item: item[0])
             trip = self.trips[trip_id]
+            t_id = intern(trip_id)
+            r_id = intern(trip["route_id"])
+            h_sign = intern(trip["headsign"]) if trip["headsign"] else ""
+            s_id = intern(trip["service_id"])
             for start, end in zip(times, times[1:]):
                 if end[2] < start[3]:
                     continue
-                self.edges.append({
-                    "from_stop": start[1],
-                    "to_stop": end[1],
-                    "departure": start[3],
-                    "arrival": end[2],
-                    "trip_id": trip_id,
-                    "route_id": trip["route_id"],
-                    "headsign": trip["headsign"],
-                    "service_id": trip["service_id"],
-                })
+                edges.append(
+                    GTFSEdge(start[1], end[1], start[3], end[2], t_id, r_id, h_sign, s_id)
+                )
         del stop_times
+        gc.collect()
 
         self.calendar = calendar
         self._load_calendar_dates()
@@ -302,6 +359,7 @@ class GTFSNetwork:
 
 
 _cached_networks: dict[tuple[str, float], GTFSNetwork] = {}
+_network_lock = threading.Lock()
 
 
 def get_gtfs_network() -> GTFSNetwork | None:
@@ -325,10 +383,16 @@ def get_gtfs_network() -> GTFSNetwork | None:
         return None
     try:
         cache_key = (str(path.resolve()), path.stat().st_mtime)
-        if cache_key in _cached_networks:
-            return _cached_networks[cache_key]
+    except Exception:
+        with _network_lock:
+            return GTFSNetwork(path)
+    cached = _cached_networks.get(cache_key)
+    if cached is not None:
+        return cached
+    with _network_lock:
+        cached = _cached_networks.get(cache_key)
+        if cached is not None:
+            return cached
         network = GTFSNetwork(path)
         _cached_networks[cache_key] = network
         return network
-    except Exception:
-        return GTFSNetwork(path)
