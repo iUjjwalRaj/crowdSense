@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 import heapq
 import math
 from datetime import date, datetime, timedelta
@@ -181,10 +182,10 @@ def plan_journey(
         for service_day in candidate_service_days
     ]
     active_cache: dict[tuple[str, date], bool] = {}
-    concrete_stop_cache: dict[str, list[dict]] = {}
+    concrete_stop_cache: dict[str, tuple[list[int], list[dict], dict[str, list[dict]], int]] = {}
     max_horizon = departure_epoch + 49 * 3600
 
-    def get_stop_edges(stop_id: str) -> list[dict]:
+    def get_stop_edges(stop_id: str) -> tuple[list[int], list[dict], dict[str, list[dict]], int]:
         cached = concrete_stop_cache.get(stop_id)
         if cached is not None:
             return cached
@@ -222,21 +223,37 @@ def plan_journey(
                     "service_day": service_day_iso,
                 })
         expanded.sort(key=lambda item: item["departure_epoch"])
-        concrete_stop_cache[stop_id] = expanded
-        return expanded
+        dep_epochs: list[int] = []
+        same_trip_map: dict[str, list[dict]] = {}
+        route_targets: set[tuple[str, str]] = set()
+        for item in expanded:
+            dep_epochs.append(item["departure_epoch"])
+            same_trip_map.setdefault(item["trip_id"], []).append(item)
+            route_targets.add((item["route_id"], item["to_stop"]))
+        result = (dep_epochs, expanded, same_trip_map, len(route_targets))
+        concrete_stop_cache[stop_id] = result
+        return result
 
     dest_stop_obj = network.stops.get(destination_stop, {})
     dest_lat = float(dest_stop_obj["lat"]) if dest_stop_obj.get("lat") is not None else None
     dest_lng = float(dest_stop_obj["lng"]) if dest_stop_obj.get("lng") is not None else None
+    h_cache: dict[str, float] = {}
 
     def heuristic(stop_id: str) -> float:
+        cached = h_cache.get(stop_id)
+        if cached is not None:
+            return cached
         if dest_lat is None or dest_lng is None:
+            h_cache[stop_id] = 0.0
             return 0.0
         s = network.stops.get(stop_id, {})
         if s.get("lat") is None or s.get("lng") is None:
+            h_cache[stop_id] = 0.0
             return 0.0
         dist = _haversine_meters(float(s["lat"]), float(s["lng"]), dest_lat, dest_lng)
-        return dist / 50.0  # 50 m/s = 180 km/h
+        val = dist / 50.0  # 50 m/s = 180 km/h
+        h_cache[stop_id] = val
+        return val
 
     def _build_segment(step: tuple) -> dict:
         kind = step[0]
@@ -311,9 +328,34 @@ def plan_journey(
         best: dict[tuple[str, str | None, int], tuple[float, int]] = {
             (origin_stop, None, 0): (0.0, departure_epoch)
         }
+        transfer_frontier: dict[tuple[str, int], list[tuple[float, int]]] = {}
+        transfer_penalty_per_hop = 600 if weight_profile == "comfort" else (0 if weight_profile == "fastest" else 300)
+
+        def _relax_transit(stop_id: str, edge: dict, arrival_time: int, cost: float, transfers: int, transfer_count: int, path_node: tuple | None) -> None:
+            nonlocal counter
+            wait = max(0, edge["departure_epoch"] - arrival_time)
+            travel = edge["arrival_epoch"] - edge["departure_epoch"]
+            added = wait + travel + transfer_count * transfer_penalty_per_hop
+            new_time = edge["arrival_epoch"]
+            new_cost = cost + added
+            key = (edge["to_stop"], edge["trip_id"], transfer_count)
+            prior = best.get(key)
+            if prior is None or new_cost < prior[0]:
+                best[key] = (new_cost, new_time)
+                counter += 1
+                h = heuristic(edge["to_stop"])
+                step = ("transit", stop_id, edge, wait, travel, transfer_count > transfers)
+                heapq.heappush(heap, (
+                    new_cost + h, new_cost, new_time, counter,
+                    edge["to_stop"], edge["trip_id"], transfer_count,
+                    (path_node, step),
+                ))
 
         while heap:
             priority, cost, arrival_time, _, stop_id, trip_id, transfers, path_node = heapq.heappop(heap)
+            state_best = best.get((stop_id, trip_id, transfers))
+            if state_best is not None and cost > state_best[0]:
+                continue
             if stop_id == destination_stop:
                 steps: list[tuple] = []
                 cursor = path_node
@@ -326,43 +368,47 @@ def plan_journey(
             if transfers > max_transfers:
                 continue
 
-            seen_routes: dict[tuple, int] = {}
-            for edge in get_stop_edges(stop_id):
-                if edge["departure_epoch"] < arrival_time:
-                    continue
-                is_same_trip = (trip_id is not None and edge["trip_id"] == trip_id)
-                if not is_same_trip:
-                    transfer_count = transfers + 1 if trip_id is not None else transfers
-                    if transfer_count > max_transfers:
-                        continue
-                    r_key = (edge["route_id"], edge["to_stop"])
-                    if seen_routes.get(r_key, 0) >= 2:
-                        continue
-                    seen_routes[r_key] = seen_routes.get(r_key, 0) + 1
-                else:
-                    transfer_count = transfers
+            dep_epochs, stop_edges, same_trip_map, num_route_targets = get_stop_edges(stop_id)
+            if trip_id is not None:
+                for edge in same_trip_map.get(trip_id, ()):
+                    if edge["departure_epoch"] >= arrival_time:
+                        _relax_transit(stop_id, edge, arrival_time, cost, transfers, transfers, path_node)
 
-                wait = max(0, edge["departure_epoch"] - arrival_time)
-                travel = edge["arrival_epoch"] - edge["departure_epoch"]
-                if weight_profile == "fastest":
-                    added = wait + travel
-                elif weight_profile == "comfort":
-                    added = wait + travel + transfer_count * 10 * 60
-                else:
-                    added = wait + travel + transfer_count * 5 * 60
-                new_time = edge["arrival_epoch"]
-                key = (edge["to_stop"], edge["trip_id"], transfer_count)
-                prior = best.get(key)
-                if prior is None or (cost + added) < prior[0]:
-                    best[key] = (cost + added, new_time)
-                    counter += 1
-                    h = heuristic(edge["to_stop"])
-                    step = ("transit", stop_id, edge, wait, travel, transfer_count > transfers)
-                    heapq.heappush(heap, (
-                        cost + added + h, cost + added, new_time, counter,
-                        edge["to_stop"], edge["trip_id"], transfer_count,
-                        (path_node, step),
-                    ))
+            next_transfer_count = transfers + 1 if trip_id is not None else transfers
+            if next_transfer_count > max_transfers:
+                continue
+
+            dominated = False
+            for t in range(transfers + 1):
+                for prev_cost, prev_time in transfer_frontier.get((stop_id, t), ()):
+                    if prev_cost <= cost and prev_time <= arrival_time:
+                        dominated = True
+                        break
+                if dominated:
+                    break
+            if dominated:
+                continue
+            frontier_list = transfer_frontier.setdefault((stop_id, transfers), [])
+            frontier_list.append((cost, arrival_time))
+
+            seen_routes: dict[tuple, int] = {}
+            completed_routes = 0
+            start_idx = bisect_left(dep_epochs, arrival_time)
+            for idx in range(start_idx, len(stop_edges)):
+                edge = stop_edges[idx]
+                if trip_id is not None and edge["trip_id"] == trip_id:
+                    continue
+                r_key = (edge["route_id"], edge["to_stop"])
+                count = seen_routes.get(r_key, 0)
+                if count >= 2:
+                    continue
+                count += 1
+                seen_routes[r_key] = count
+                if count == 2:
+                    completed_routes += 1
+                _relax_transit(stop_id, edge, arrival_time, cost, transfers, next_transfer_count, path_node)
+                if completed_routes >= num_route_targets:
+                    break
 
             if trip_id is not None:
                 for walk in walking_by_stop.get(stop_id, []):
